@@ -7,10 +7,21 @@ This tool deobfuscates SystemJS packed JavaScript files by extracting `System.Re
 - Parses obfuscated JavaScript files using Babel parser
 - Finds all `System.Register` calls automatically
 - Extracts file names from any path format (e.g., `chunk:\\Folder\\File.ts`, `src/components/Button.tsx`, `./utils/helper.js`)
+- **Handles special characters**: Sanitizes file names and method names while preserving original paths
 - Creates separate JavaScript files for each module (always with `.js` extension)
 - Wraps each module in a named function (e.g., `RegisterPlayer`)
 - Replaces original calls with method calls
 - Adds appropriate require statements
+
+## Special Character Handling
+
+The tool automatically sanitizes special characters in file names and method names:
+
+- `chunks:///_virtual/ComponentCurseEffectiveRogueSkillList%20.ts` → `ComponentCurseEffectiveRogueSkillList_20.js` → `RegisterComponentCurseEffectiveRogueSkillList_20()`
+- `chunks:///_virtual/util.mjs_cjs=&original=.js` → `util_mjs_cjs_original.js` → `RegisterUtil_mjs_cjs_original()`
+- `File Name With Spaces.ts` → `File_Name_With_Spaces.js` → `RegisterFile_Name_With_Spaces()`
+
+Original paths are preserved in the `System.register` calls and comments.
 
 ## Usage
 

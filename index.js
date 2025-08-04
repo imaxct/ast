@@ -83,7 +83,8 @@ function extractFileName(pathString) {
     // Handle different path formats and extract just the filename
     // Examples:
     // "chunk:\\SomeFolder\\FileName.ts" -> "FileName.ts"
-    // "src/components/Button.tsx" -> "Button.tsx"
+    // "chunks:///_virtual/util.mjs_cjs=&original=.js" -> "util.mjs_cjs=&original=.js"
+    // "chunks:///_virtual/ComponentCurseEffectiveRogueSkillList%20.ts" -> "ComponentCurseEffectiveRogueSkillList%20.ts"
     // "./utils/helper.js" -> "helper.js"
     // "FileName.ts" -> "FileName.ts"
     
@@ -100,17 +101,59 @@ function extractFileName(pathString) {
     }
     
     // Clean up any remaining special characters at the start
-    fileName = fileName.replace(/^[^a-zA-Z0-9_-]+/, '');
+    fileName = fileName.replace(/^[^a-zA-Z0-9_.-]+/, '');
     
     return fileName || null;
+}
+
+// Function to sanitize file name for file system
+function sanitizeFileName(fileName) {
+    if (!fileName) return null;
+    
+    // Get the file extension first
+    const lastDotIndex = fileName.lastIndexOf('.');
+    let baseName = fileName;
+    let extension = '';
+    
+    if (lastDotIndex > 0) {
+        baseName = fileName.substring(0, lastDotIndex);
+        extension = fileName.substring(lastDotIndex);
+    }
+    
+    // Remove or replace invalid file name characters
+    // Keep only letters, numbers, underscore, hyphen
+    baseName = baseName.replace(/[%\s=&<>:"/\\|?*]/g, '_')
+                     .replace(/[^\w\s-]/g, '_')
+                     .replace(/_{2,}/g, '_')
+                     .replace(/^_+|_+$/g, '');
+    
+    // Ensure it starts with a letter or underscore
+    if (!/^[a-zA-Z_]/.test(baseName)) {
+        baseName = '_' + baseName;
+    }
+    
+    return baseName + extension;
 }
 
 // Function to create method name from file name
 function createMethodName(fileName) {
     // Remove extension and convert to camelCase
     const baseName = path.parse(fileName).name;
+    
+    // Sanitize the base name for JavaScript identifier
+    // Remove or replace invalid JavaScript identifier characters
+    let sanitizedName = baseName.replace(/[%\s=&<>:"/\\|?*]/g, '_')
+                                .replace(/[^\w]/g, '_')
+                                .replace(/_{2,}/g, '_')
+                                .replace(/^_+|_+$/g, '');
+    
+    // Ensure it starts with a letter or underscore
+    if (!/^[a-zA-Z_]/.test(sanitizedName)) {
+        sanitizedName = '_' + sanitizedName;
+    }
+    
     // Convert to PascalCase and prefix with "Register"
-    const methodName = 'Register' + baseName.charAt(0).toUpperCase() + baseName.slice(1);
+    const methodName = 'Register' + sanitizedName.charAt(0).toUpperCase() + sanitizedName.slice(1);
     return methodName;
 }
 
@@ -152,13 +195,21 @@ systemRegisterCalls.forEach((call, index) => {
         return;
     }
     
-    console.log(`Processing: ${chunkPath} -> ${fileName}`);
+    // Sanitize the file name for file system
+    const sanitizedFileName = sanitizeFileName(fileName);
+    
+    if (!sanitizedFileName) {
+        console.log(`Skipping call ${index + 1}: Could not sanitize file name "${fileName}"`);
+        return;
+    }
+    
+    console.log(`Processing: ${chunkPath} -> ${fileName} -> ${sanitizedFileName}`);
     
     // Extract the original System.Register call code
     const originalCode = extractOriginalCode(gameJsContent, call.start, call.end);
     
-    // Create method name
-    const methodName = createMethodName(fileName);
+    // Create method name (sanitized)
+    const methodName = createMethodName(sanitizedFileName);
     
     // Create the new file content
     const newFileContent = `// Generated from ${chunkPath}
@@ -170,7 +221,7 @@ module.exports = { ${methodName} };
 `;
     
     // Always create .js files for Node.js compatibility
-    const baseName = path.parse(fileName).name;
+    const baseName = path.parse(sanitizedFileName).name;
     const jsFileName = `${baseName}.js`;
     const newFilePath = path.join(workingDirectory, jsFileName);
     fs.writeFileSync(newFilePath, newFileContent);
