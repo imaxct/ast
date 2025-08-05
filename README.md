@@ -8,6 +8,8 @@ This tool deobfuscates SystemJS packed JavaScript files by extracting `System.Re
 - Finds all `System.Register` calls automatically
 - Extracts file names from any path format (e.g., `chunk:\\Folder\\File.ts`, `src/components/Button.tsx`, `./utils/helper.js`)
 - **Handles special characters**: Sanitizes file names and method names while preserving original paths
+- **Evaluates constant conditions**: Automatically evaluates and replaces `if` conditions that use only constants and locally defined Math functions
+- **Deobfuscates array-based control flow**: Detects and reorders switch statements that use manipulated arrays to obscure execution order
 - Creates separate JavaScript files for each module (always with `.js` extension)
 - Wraps each module in a named function (e.g., `RegisterPlayer`)
 - Replaces original calls with method calls
@@ -22,6 +24,90 @@ The tool automatically sanitizes special characters in file names and method nam
 - `File Name With Spaces.ts` → `File_Name_With_Spaces.js` → `RegisterFile_Name_With_Spaces()`
 
 Original paths are preserved in the `System.register` calls and comments.
+
+## Constant Condition Evaluation
+
+The tool automatically detects and evaluates `if` conditions that use only:
+- Local variables assigned to constants or Math functions
+- Literal values (numbers, strings)
+- Math operations and function calls
+
+### Examples:
+
+```javascript
+// Before
+function obfuscated() {
+    var a = Math.log;
+    var x = 5;
+    var y = 10;
+    
+    if (x + y > 12) {
+        console.log("condition A");
+    }
+    
+    if (a(100) > a(50)) {
+        console.log("condition B");
+    }
+}
+
+// After
+function obfuscated() {
+    var a = Math.log;
+    var x = 5;
+    var y = 10;
+    
+    if (true) {
+        console.log("condition A");
+    }
+    
+    if (true) {
+        console.log("condition B");
+    }
+}
+```
+
+This helps reveal the actual control flow in obfuscated code by removing constant condition obfuscation.
+
+## Array-Based Control Flow Deobfuscation
+
+The tool automatically detects and reorders switch statements that use array manipulation to obscure execution order:
+
+### Example:
+
+```javascript
+// Before (obfuscated)
+function swap(arr, i, j) { /* swap elements */ }
+
+var order = [2, 0, 1, 3];
+swap(order, 0, 3);  // [3, 0, 1, 2]
+
+for (let i of order) {
+    switch (i) {
+        case 0: createObject(); break;
+        case 1: setupProperties(); break;
+        case 2: finalizeObject(); break;
+        case 3: initializeData(); break;
+    }
+}
+
+// After (deobfuscated)
+// Execution order: [3, 0, 1, 2]
+{
+    // Step 1: Case 3
+    initializeData();
+    
+    // Step 2: Case 0
+    createObject();
+    
+    // Step 3: Case 1
+    setupProperties();
+    
+    // Step 4: Case 2
+    finalizeObject();
+}
+```
+
+This reveals the true execution order hidden behind array manipulations and switch statements.
 
 ## Usage
 

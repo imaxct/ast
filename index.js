@@ -22,7 +22,7 @@ const inputFileName = path.basename(inputFilePath);
 console.log(`Processing ${inputFileName} in: ${workingDirectory}`);
 
 // Read the obfuscated input file
-const gameJsContent = fs.readFileSync(inputFilePath, 'utf8');
+let gameJsContent = fs.readFileSync(inputFilePath, 'utf8');
 
 // Parse the JavaScript using Babel parser
 let ast;
@@ -157,9 +157,424 @@ function createMethodName(fileName) {
     return methodName;
 }
 
+// Function to evaluate constant conditions in if statements
+function evaluateConstantConditions(ast, content) {
+    const evaluatedConditions = [];
+    let modifiedContent = content;
+    
+    function traverse(node, scope = new Map()) {
+        if (!node || typeof node !== 'object') return;
+        
+        // Track variable declarations in current scope
+        if (node.type === 'VariableDeclaration') {
+            node.declarations.forEach(declaration => {
+                if (declaration.init && declaration.id && declaration.id.name) {
+                    // Track simple assignments like: var a = Math.log;
+                    if (declaration.init.type === 'MemberExpression') {
+                        const objName = declaration.init.object.name;
+                        const propName = declaration.init.property.name;
+                        if (objName === 'Math') {
+                            scope.set(declaration.id.name, `Math.${propName}`);
+                        }
+                    }
+                    // Track literal assignments
+                    else if (declaration.init.type === 'Literal' || declaration.init.type === 'NumericLiteral' || declaration.init.type === 'StringLiteral') {
+                        scope.set(declaration.id.name, declaration.init.value);
+                    }
+                }
+            });
+        }
+        
+        // Process if statements
+        if (node.type === 'IfStatement' && node.test) {
+            const condition = evaluateConditionExpression(node.test, scope);
+            if (condition !== null) {
+                evaluatedConditions.push({
+                    node: node,
+                    originalCondition: content.substring(node.test.start, node.test.end),
+                    evaluatedValue: condition,
+                    start: node.test.start,
+                    end: node.test.end
+                });
+            }
+        }
+        
+        // Recursively traverse all properties
+        for (const key in node) {
+            if (node.hasOwnProperty(key) && node[key] && typeof node[key] === 'object') {
+                if (Array.isArray(node[key])) {
+                    node[key].forEach(child => traverse(child, scope));
+                } else {
+                    traverse(node[key], scope);
+                }
+            }
+        }
+    }
+    
+    traverse(ast);
+    
+    // Apply the evaluated conditions (in reverse order to maintain positions)
+    evaluatedConditions.sort((a, b) => b.start - a.start);
+    
+    evaluatedConditions.forEach(condition => {
+        const before = modifiedContent.substring(0, condition.start);
+        const after = modifiedContent.substring(condition.end);
+        const newCondition = condition.evaluatedValue.toString();
+        
+        modifiedContent = before + newCondition + after;
+        console.log(`Replaced condition: ${condition.originalCondition} → ${newCondition}`);
+    });
+    
+    return modifiedContent;
+}
+
+// Function to deobfuscate array-based control flow
+function deobfuscateArrayControlFlow(ast, originalContent) {
+    let modifiedContent = originalContent;
+    const replacements = [];
+    
+    function traverse(node, scope = new Map()) {
+        if (!node || typeof node !== 'object') return;
+        
+        // Track variable declarations (arrays and functions)
+        if (node.type === 'VariableDeclaration') {
+            node.declarations.forEach(declaration => {
+                if (declaration.init && declaration.id && declaration.id.name) {
+                    if (declaration.init.type === 'ArrayExpression') {
+                        // Track array initialization
+                        const arrayValues = declaration.init.elements.map(el => 
+                            el && (el.type === 'NumericLiteral' || el.type === 'Literal') ? el.value : null
+                        );
+                        if (arrayValues.every(v => v !== null)) {
+                            scope.set(declaration.id.name, { type: 'array', value: [...arrayValues] });
+                        }
+                    }
+                }
+            });
+        }
+        
+        // Track function declarations that manipulate arrays
+        if (node.type === 'FunctionDeclaration' && node.id && node.id.name) {
+            // Look for simple swap functions like l8p(a, b, c)
+            if (node.params && node.params.length === 3 && node.body && node.body.body) {
+                const isSwapFunction = isArraySwapFunction(node.body.body);
+                if (isSwapFunction) {
+                    scope.set(node.id.name, { type: 'swap_function' });
+                }
+            }
+        }
+        
+        // Track function calls that manipulate arrays
+        if (node.type === 'CallExpression' && node.callee && node.callee.name) {
+            const funcName = node.callee.name;
+            if (scope.has(funcName) && scope.get(funcName).type === 'swap_function') {
+                // This is a call to our swap function
+                if (node.arguments.length === 3) {
+                    const arrayName = node.arguments[0].name;
+                    const index1 = getConstantValue(node.arguments[1], scope);
+                    const index2 = getConstantValue(node.arguments[2], scope);
+                    
+                    if (arrayName && index1 !== null && index2 !== null && scope.has(arrayName)) {
+                        const arrayData = scope.get(arrayName);
+                        if (arrayData.type === 'array') {
+                            // Perform the swap
+                            const temp = arrayData.value[index1];
+                            arrayData.value[index1] = arrayData.value[index2];
+                            arrayData.value[index2] = temp;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Look for for-of loops with switch statements
+        if (node.type === 'ForOfStatement' && node.right && node.right.name && node.body) {
+            const arrayName = node.right.name;
+            if (scope.has(arrayName) && scope.get(arrayName).type === 'array') {
+                const finalArray = scope.get(arrayName).value;
+                const switchStatement = findSwitchInBlock(node.body);
+                
+                if (switchStatement) {
+                    const reorderedStatements = reorderSwitchCases(switchStatement, finalArray, originalContent);
+                    if (reorderedStatements) {
+                        replacements.push({
+                            start: node.start,
+                            end: node.end,
+                            replacement: `// Original for-of loop replaced with deobfuscated execution order\n        ${reorderedStatements}`,
+                            originalArray: arrayName,
+                            finalOrder: finalArray
+                        });
+                    }
+                }
+            }
+        }
+        
+        // Recursively traverse
+        for (const key in node) {
+            if (node.hasOwnProperty(key) && node[key] && typeof node[key] === 'object') {
+                if (Array.isArray(node[key])) {
+                    node[key].forEach(child => traverse(child, scope));
+                } else {
+                    traverse(node[key], scope);
+                }
+            }
+        }
+    }
+    
+    traverse(ast);
+    
+    // Apply replacements in reverse order
+    replacements.sort((a, b) => b.start - a.start);
+    
+    replacements.forEach(replacement => {
+        const before = modifiedContent.substring(0, replacement.start);
+        const after = modifiedContent.substring(replacement.end);
+        
+        modifiedContent = before + replacement.replacement + after;
+        console.log(`Reordered switch based on array ${replacement.originalArray}: [${replacement.finalOrder.join(', ')}]`);
+    });
+    
+    return modifiedContent;
+}
+
+// Check if a function body represents an array swap function
+function isArraySwapFunction(statements) {
+    if (statements.length < 3) return false;
+    
+    // Look for pattern: let d = a[b]; a[b] = a[c]; a[c] = d;
+    const hasTemp = statements.some(stmt => 
+        stmt.type === 'VariableDeclaration' && 
+        stmt.declarations.some(decl => 
+            decl.init && decl.init.type === 'MemberExpression'
+        )
+    );
+    
+    const hasAssignments = statements.filter(stmt => 
+        stmt.type === 'ExpressionStatement' && 
+        stmt.expression && stmt.expression.type === 'AssignmentExpression' &&
+        stmt.expression.left && stmt.expression.left.type === 'MemberExpression'
+    ).length >= 2;
+    
+    return hasTemp && hasAssignments;
+}
+
+// Get constant value from a node
+function getConstantValue(node, scope) {
+    if (!node) return null;
+    
+    if (node.type === 'NumericLiteral' || node.type === 'Literal') {
+        return node.value;
+    }
+    
+    if (node.type === 'Identifier' && scope.has(node.name)) {
+        const data = scope.get(node.name);
+        return data.type === 'constant' ? data.value : null;
+    }
+    
+    return null;
+}
+
+// Find switch statement in a block
+function findSwitchInBlock(node) {
+    if (node.type === 'SwitchStatement') return node;
+    
+    if (node.type === 'BlockStatement' && node.body) {
+        for (const stmt of node.body) {
+            if (stmt.type === 'SwitchStatement') return stmt;
+            const found = findSwitchInBlock(stmt);
+            if (found) return found;
+        }
+    }
+    
+    return null;
+}
+
+// Reorder switch cases based on array order
+function reorderSwitchCases(switchNode, arrayOrder, originalContent) {
+    if (!switchNode.cases) return null;
+    
+    // Debug: log the switch structure
+    console.log('Switch cases found:', switchNode.cases.length);
+    
+    // Create a map of case value to case node
+    const caseMap = new Map();
+    let defaultCase = null;
+    
+    switchNode.cases.forEach((caseNode, caseIndex) => {
+        console.log(`Case ${caseIndex}:`, caseNode.test ? caseNode.test.value : 'default', 'statements:', caseNode.consequent.length);
+        
+        if (caseNode.test === null) {
+            defaultCase = caseNode;
+        } else if (caseNode.test.type === 'NumericLiteral' || caseNode.test.type === 'Literal') {
+            caseMap.set(caseNode.test.value, caseNode);
+            
+            // Debug each statement in this case
+            caseNode.consequent.forEach((stmt, stmtIndex) => {
+                const stmtText = originalContent.substring(stmt.start, stmt.end).trim();
+                console.log(`  Statement ${stmtIndex}: ${stmt.type} = "${stmtText.substring(0, 50)}..."`);
+            });
+        }
+    });
+    
+    // Generate reordered statements
+    let reorderedCode = '// Deobfuscated switch - execution order: [' + arrayOrder.join(', ') + ']\n';
+    
+    arrayOrder.forEach((value, index) => {
+        if (caseMap.has(value)) {
+            const caseNode = caseMap.get(value);
+            const statements = caseNode.consequent || [];
+            
+            reorderedCode += `// Step ${index + 1}: Case ${value}\n`;
+            
+            // Process each statement in the case
+            statements.forEach((stmt, i) => {
+                // Skip break statements that are at the end of a case
+                if (stmt.type === 'BreakStatement' && i === statements.length - 1) {
+                    return; // Skip trailing breaks
+                }
+                
+                // Extract the source code for this specific statement
+                if (stmt.start && stmt.end) {
+                    let sourceCode = originalContent.substring(stmt.start, stmt.end).trim();
+                    
+                    // Add the statement to our output
+                    reorderedCode += sourceCode + '\n';
+                }
+            });
+            
+            if (index < arrayOrder.length - 1) {
+                reorderedCode += '\n';
+            }
+        }
+    });
+    
+    return reorderedCode;
+}
+
+// Extract source code for a statement from the original content
+function extractSourceCode(node, originalContent) {
+    if (!node.start || !node.end) return '// Could not extract source';
+    
+    let sourceCode = originalContent.substring(node.start, node.end).trim();
+    
+    // Debug: log what we're extracting
+    console.log(`Extracting ${node.type}: "${sourceCode.substring(0, 50)}..."`);
+    
+    // For incomplete extractions, try to find the complete statement
+    if (node.type === 'ExpressionStatement' && sourceCode && !sourceCode.includes('=')) {
+        // The extraction might be incomplete, try the full node range
+        sourceCode = originalContent.substring(node.start, node.end).trim();
+    }
+    
+    // Clean up and format the extracted code
+    if (!sourceCode.endsWith(';') && !sourceCode.endsWith('}') && 
+        node.type !== 'BreakStatement' && node.type !== 'ReturnStatement' &&
+        node.type !== 'BlockStatement') {
+        sourceCode += ';';
+    }
+    
+    return sourceCode;
+}
+
+// Function to evaluate a condition expression if it contains only constants
+function evaluateConditionExpression(node, scope) {
+    try {
+        const expression = buildExpression(node, scope);
+        if (expression === null) return null;
+        
+        // Only evaluate if expression contains no undefined variables
+        const result = Function(`"use strict"; return (${expression})`)();
+        return typeof result === 'boolean' ? result : (typeof result === 'number' ? result > 0 : null);
+    } catch (error) {
+        return null; // If evaluation fails, don't replace
+    }
+}
+
+// Function to build expression string from AST node
+function buildExpression(node, scope) {
+    if (!node) return null;
+    
+    switch (node.type) {
+        case 'Literal':
+        case 'NumericLiteral':
+        case 'StringLiteral':
+            return typeof node.value === 'string' ? `"${node.value}"` : String(node.value);
+            
+        case 'Identifier':
+            if (scope.has(node.name)) {
+                const value = scope.get(node.name);
+                return typeof value === 'string' && value.startsWith('Math.') ? value : JSON.stringify(value);
+            }
+            return null; // Unknown identifier
+            
+        case 'BinaryExpression':
+            const left = buildExpression(node.left, scope);
+            const right = buildExpression(node.right, scope);
+            if (left === null || right === null) return null;
+            return `(${left} ${node.operator} ${right})`;
+            
+        case 'CallExpression':
+            if (node.callee.type === 'Identifier' && scope.has(node.callee.name)) {
+                const funcName = scope.get(node.callee.name);
+                if (typeof funcName === 'string' && funcName.startsWith('Math.')) {
+                    const args = node.arguments.map(arg => buildExpression(arg, scope));
+                    if (args.some(arg => arg === null)) return null;
+                    return `${funcName}(${args.join(', ')})`;
+                }
+            }
+            return null;
+            
+        case 'UnaryExpression':
+            const argument = buildExpression(node.argument, scope);
+            if (argument === null) return null;
+            return `${node.operator}${argument}`;
+            
+        default:
+            return null;
+    }
+}
+
 // Find all System.Register calls
 const systemRegisterCalls = findSystemRegisterCalls(ast);
 console.log(`Found ${systemRegisterCalls.length} System.Register calls`);
+
+// Store original content for AST position references
+const originalGameJsContent = gameJsContent;
+
+// Process constant condition evaluation
+console.log('Processing constant conditions...');
+const constantEvaluatedContent = evaluateConstantConditions(ast, gameJsContent);
+console.log('Constant condition evaluation completed');
+
+// Process array-based control flow obfuscation (use original content for AST positions)
+console.log('Processing array-based control flow...');
+const arrayDeobfuscatedContent = deobfuscateArrayControlFlow(ast, originalGameJsContent);
+console.log('Array control flow deobfuscation completed');
+
+// If both transformations happened, we need to apply the constant evaluations to the array-transformed content
+if (constantEvaluatedContent !== gameJsContent && arrayDeobfuscatedContent !== originalGameJsContent) {
+    // Re-parse and apply constant conditions to the array-deobfuscated content
+    let finalContent = arrayDeobfuscatedContent;
+    try {
+        const newAst = parser.parse(arrayDeobfuscatedContent, {
+            sourceType: 'script',
+            allowImportExportEverywhere: true,
+            allowReturnOutsideFunction: true,
+            plugins: []
+        });
+        finalContent = evaluateConstantConditions(newAst, arrayDeobfuscatedContent);
+        gameJsContent = finalContent;
+    } catch (error) {
+        console.log('Could not re-apply constant evaluation to array-deobfuscated content, using array result only');
+        gameJsContent = arrayDeobfuscatedContent;
+    }
+} else if (constantEvaluatedContent !== gameJsContent) {
+    // Only constant evaluation happened
+    gameJsContent = constantEvaluatedContent;
+} else if (arrayDeobfuscatedContent !== originalGameJsContent) {
+    // Only array deobfuscation happened
+    gameJsContent = arrayDeobfuscatedContent;
+}
 
 const createdFiles = [];
 const methodReplacements = [];
