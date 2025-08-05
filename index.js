@@ -2,12 +2,26 @@ const fs = require('fs');
 const path = require('path');
 const parser = require('@babel/parser');
 
-// Get input file path from command line argument
-const inputFilePath = process.argv[2];
+// Parse command line arguments
+const args = process.argv.slice(2);
+let inputFilePath = null;
+let enableSwitchDeobfuscation = false;
+
+// Parse arguments
+for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === '--switch' || arg === '-s') {
+        enableSwitchDeobfuscation = true;
+    } else if (!inputFilePath && !arg.startsWith('-')) {
+        inputFilePath = arg;
+    }
+}
 
 if (!inputFilePath) {
     console.error('Please provide the path to the input JavaScript file');
-    console.error('Usage: node index.js <path/to/input.js>');
+    console.error('Usage: node index.js [options] <path/to/input.js>');
+    console.error('Options:');
+    console.error('  --switch, -s    Enable array-based switch deobfuscation');
     process.exit(1);
 }
 
@@ -547,9 +561,14 @@ const constantEvaluatedContent = evaluateConstantConditions(ast, gameJsContent);
 console.log('Constant condition evaluation completed');
 
 // Process array-based control flow obfuscation (use original content for AST positions)
-console.log('Processing array-based control flow...');
-const arrayDeobfuscatedContent = deobfuscateArrayControlFlow(ast, originalGameJsContent);
-console.log('Array control flow deobfuscation completed');
+let arrayDeobfuscatedContent = originalGameJsContent;
+if (enableSwitchDeobfuscation) {
+    console.log('Processing array-based control flow...');
+    arrayDeobfuscatedContent = deobfuscateArrayControlFlow(ast, originalGameJsContent);
+    console.log('Array control flow deobfuscation completed');
+} else {
+    console.log('Array-based switch deobfuscation disabled (use --switch to enable)');
+}
 
 // If both transformations happened, we need to apply the constant evaluations to the array-transformed content
 if (constantEvaluatedContent !== gameJsContent && arrayDeobfuscatedContent !== originalGameJsContent) {
