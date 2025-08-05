@@ -179,6 +179,26 @@ function evaluateConstantConditions(ast, content) {
     function traverse(node, scope = new Map()) {
         if (!node || typeof node !== 'object') return;
         
+        // Handle function declarations and create new scope for parameters
+        if (node.type === 'FunctionDeclaration' || node.type === 'FunctionExpression') {
+            const newScope = new Map(scope); // Create new scope inheriting from parent
+            
+            // Add function parameters to the new scope as unknown values
+            if (node.params) {
+                node.params.forEach(param => {
+                    if (param.type === 'Identifier') {
+                        newScope.set(param.name, 'UNKNOWN_PARAMETER');
+                    }
+                });
+            }
+            
+            // Traverse function body with the new scope
+            if (node.body) {
+                traverse(node.body, newScope);
+            }
+            return; // Don't traverse further with the original scope
+        }
+        
         // Track variable declarations in current scope
         if (node.type === 'VariableDeclaration') {
             node.declarations.forEach(declaration => {
@@ -517,6 +537,10 @@ function buildExpression(node, scope) {
         case 'Identifier':
             if (scope.has(node.name)) {
                 const value = scope.get(node.name);
+                // If this is an unknown parameter, we can't evaluate
+                if (value === 'UNKNOWN_PARAMETER') {
+                    return null;
+                }
                 return typeof value === 'string' && value.startsWith('Math.') ? value : JSON.stringify(value);
             }
             return null; // Unknown identifier
